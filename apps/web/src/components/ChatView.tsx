@@ -51,6 +51,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
+  AuthPreviewOperateScope,
   type AssistantCitation,
   type ChatFileAttachment,
   CommandId,
@@ -5304,9 +5305,13 @@ export default function ChatView(props: ChatViewProps) {
     },
     [environmentId, navigate],
   );
+  const canOperatePreview = useEnvironmentScope(
+    activeThreadRef?.environmentId ?? null,
+    AuthPreviewOperateScope,
+  );
   const createBrowserSurface = useCallback(
     (profileId?: string) => {
-      if (!activeThreadRef) return;
+      if (!activeThreadRef || !canOperatePreview) return;
       void addBrowserSurface({
         threadRef: activeThreadRef,
         openPreview,
@@ -5325,7 +5330,7 @@ export default function ChatView(props: ChatViewProps) {
         }
       });
     },
-    [activeThreadRef, openPreview],
+    [activeThreadRef, canOperatePreview, openPreview],
   );
   const addDiffSurface = useCallback(() => {
     if (!activeThreadRef || !isServerThread || !isGitRepo) return;
@@ -5772,6 +5777,7 @@ export default function ChatView(props: ChatViewProps) {
       closePreviewPanel();
       return;
     }
+    if (!canOperatePreview) return;
     const activeTabId = activePreviewState.activeTabId;
     if (activeTabId) {
       useRightPanelStore.getState().openBrowser(activeThreadRef, activeTabId);
@@ -5782,6 +5788,7 @@ export default function ChatView(props: ChatViewProps) {
     activePreviewState.activeTabId,
     activeThreadRef,
     browserAvailable,
+    canOperatePreview,
     closePreviewPanel,
     createBrowserSurface,
     previewPanelOpen,
@@ -5940,7 +5947,7 @@ export default function ChatView(props: ChatViewProps) {
     (surfaces: readonly RightPanelSurface[]) => {
       if (!activeThreadRef) return;
       for (const surface of surfaces) {
-        if (surface.kind === "preview" && surface.resourceId) {
+        if (canOperatePreview && surface.kind === "preview" && surface.resourceId) {
           void closePreviewSession({
             closePreview,
             snapshot: activePreviewState.sessions[surface.resourceId] ?? null,
@@ -5962,6 +5969,7 @@ export default function ChatView(props: ChatViewProps) {
     [
       activeThreadRef,
       activePreviewState.sessions,
+      canOperatePreview,
       closePreview,
       closeTerminalMutation,
       storeCloseTerminal,
@@ -11637,10 +11645,10 @@ export default function ChatView(props: ChatViewProps) {
               </div>
             </div>
 
-            {activeThreadRef && activeEnvironmentServerBrowser ? (
+            {canOperatePreview && activeThreadRef && activeEnvironmentServerBrowser ? (
               <PreviewSessionSync threadRef={activeThreadRef} />
             ) : null}
-            {activeThreadRef && activePreviewMiniPlayer && previewMiniPlayerVisible ? (
+            {canOperatePreview && activeThreadRef && activePreviewMiniPlayer && previewMiniPlayerVisible ? (
               <ThreadPreviewMiniPlayer
                 key={`${activeThreadKey}:${previewMiniPlayerSourceKey(activePreviewMiniPlayer.source)}`}
                 threadRef={activeThreadRef}
@@ -11754,7 +11762,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddPullRequest={addPullRequestSurface}
           onAddPullRequests={addPullRequestsSurface}
           onAddDevice={addDeviceSurface}
-          browserAvailable={browserAvailable}
+          browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null}
           diffAvailable={isServerThread && isGitRepo}
           filesAvailable={activeProject !== null}
@@ -11809,7 +11817,7 @@ export default function ChatView(props: ChatViewProps) {
             onAddPullRequest={addPullRequestSurface}
             onAddPullRequests={addPullRequestsSurface}
             onAddDevice={addDeviceSurface}
-            browserAvailable={browserAvailable}
+            browserAvailable={canOperatePreview && browserAvailable}
             terminalAvailable={activeProject !== null}
             diffAvailable={isServerThread && isGitRepo}
             filesAvailable={activeProject !== null}
