@@ -3375,6 +3375,12 @@ const layerWsRpc = (
               .preparePullRequestThread(input)
               .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
             { "rpc.aggregate": "git" },
+            input.mode === "worktree" && input.threadId !== undefined
+              ? [
+                  requiredScopeForRpcMethod(WS_METHODS.gitPreparePullRequestThread),
+                  AuthOrchestrationOperateScope,
+                ]
+              : undefined,
           ),
         [WS_METHODS.vcsListRefs]: (input) =>
           observeRpcEffect(WS_METHODS.vcsListRefs, gitWorkflow.listRefs(input), {
