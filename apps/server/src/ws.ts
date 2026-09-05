@@ -29,6 +29,8 @@ import {
   AuthOrchestrationOperateScope,
   type AuthEnvironmentScope,
   type ScheduledTaskListResult,
+  AuthEnvironmentMaintainScope,
+  AuthOrchestrationReadScope,
   AuthSessionId,
   ClientConnectionMethod,
   ClientDeviceType,
@@ -2645,9 +2647,15 @@ const layerWsRpc = (
             "rpc.aggregate": "server",
           }),
         [WS_METHODS.serverRetryResourceTelemetry]: (_input) =>
-          observeRpcEffect(WS_METHODS.serverRetryResourceTelemetry, resourceTelemetry.retry, {
-            "rpc.aggregate": "server",
-          }),
+          observeRpcEffect(
+            WS_METHODS.serverRetryResourceTelemetry,
+            resourceTelemetry.retry,
+            { "rpc.aggregate": "server" },
+            [
+              AuthEnvironmentMaintainScope,
+              requiredScopeForRpcMethod(WS_METHODS.serverRetryResourceTelemetry),
+            ],
+          ),
         [WS_METHODS.serverSignalProcess]: (input) =>
           observeRpcEffect(WS_METHODS.serverSignalProcess, processDiagnostics.signal(input), {
             "rpc.aggregate": "server",
