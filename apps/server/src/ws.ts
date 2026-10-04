@@ -29,8 +29,6 @@ import {
   AuthOrchestrationOperateScope,
   type AuthEnvironmentScope,
   type ScheduledTaskListResult,
-  AuthFilesystemReadScope,
-  AuthOrchestrationReadScope,
   AuthSessionId,
   ClientConnectionMethod,
   ClientDeviceType,
@@ -3267,11 +3265,6 @@ const layerWsRpc = (
               });
             }),
             { "rpc.aggregate": "workspace" },
-            [
-              input.resource._tag === "workspace-file" || input.resource._tag === "media-file"
-                ? AuthFilesystemReadScope
-                : AuthOrchestrationReadScope,
-            ],
           ),
         [WS_METHODS.assetsPersistChatAttachments]: (input) =>
           observeRpcEffect(
