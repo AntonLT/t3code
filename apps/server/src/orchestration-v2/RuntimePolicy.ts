@@ -105,6 +105,19 @@ export function resolveFusionSidekick(
   return sidekick;
 }
 
+/** Whether a thread is the sidekick's own working thread: delegated, on the sidekick's instance. */
+export function isFusionSidekickThread(
+  sidekick: ModelSelection | null,
+  thread: OrchestrationV2AppThread,
+  providerInstanceId: ProviderInstanceId,
+): boolean {
+  return (
+    sidekick !== null &&
+    thread.lineage.relationshipToParent === "subagent" &&
+    providerInstanceId === sidekick.instanceId
+  );
+}
+
 export const layerFromProjectStore: Layer.Layer<
   RuntimePolicyV2,
   never,

@@ -54,6 +54,7 @@ import {
   type ProviderAdapterV2SessionRuntime,
 } from "./ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -436,68 +437,99 @@ export const layerWithOptions = (
         (mcpCredentialReservations.get(mcpReservationKey(threadId, mcpCredentialId)) ?? 0) > 0;
       const mcpPrepareLock = yield* KeyedLock.make<ThreadId>();
       /**
-       * Resolves (or mints) the thread's MCP credential and returns it with a
-       * reservation held; the caller must drop the reservation exactly once.
-       * Serialized per thread so two concurrent prepares cannot interleave
-       * their rotate steps and revoke each other's freshly minted credential.
+       * A Fusion sidekick's own working thread gets no T3 tools: it never
+       * delegates or drives the app, and the tool catalog alone would take
+       * much of a small local model's context.
        */
+      const isFusionSidekickThread = (
+        threadId: ThreadId,
+        providerInstanceId: ProviderInstanceId,
+      ) =>
+        Option.isNone(serverSettings)
+          ? Effect.succeed(false)
+          : Effect.gen(function* () {
+              const settings = yield* serverSettings.value.getSettings;
+              const thread = yield* projectionStore.getThread(threadId);
+              return RuntimePolicy.isFusionSidekickThread(
+                settings.fusionSidekick,
+                thread,
+                providerInstanceId,
+              );
+            }).pipe(Effect.orElseSucceed(() => false));
+      const withoutMcp = (threadId: ThreadId) =>
+        Effect.sync((): PreparedMcpCredential => {
+          McpProviderSession.clearMcpProviderSession(threadId);
+          return { mcpCredentialId: undefined, issued: false };
+        });
       const prepareMcpSession = (
         threadId: ThreadId,
         providerInstanceId: ProviderInstanceId,
       ): Effect.Effect<PreparedMcpCredential> =>
         options.configureMcp === false
-          ? Effect.sync((): PreparedMcpCredential => {
-              McpProviderSession.clearMcpProviderSession(threadId);
-              return { mcpCredentialId: undefined, issued: false };
-            })
-          : mcpPrepareLock.withLock(
-              threadId,
-              Effect.gen(function* () {
-                // Reuse a still-valid credential for this thread instead of
-                // rotating: long-lived provider processes (codex app-server)
-                // build their MCP client once per conversation and keep using
-                // the credential it started with, so a thread that detaches and
-                // re-attaches across a workspace handoff must come back to the
-                // same token or the process's tool calls fail auth.
-                const { browser: browserToolsAvailable, device: deviceToolsAvailable } =
-                  yield* agentAccessSettings(threadId);
-                const capabilities = new Set<
-                  import("../mcp/McpInvocationContext.ts").McpCapability
-                >(["orchestration", "worktree", "pull-requests"]);
-                if (browserToolsAvailable) capabilities.add("preview");
-                if (deviceToolsAvailable) capabilities.add("device");
-                const existing = McpProviderSession.readMcpProviderSession(threadId);
-                if (existing !== undefined) {
-                  // Reserve before the async resolve so a release cannot
-                  // revoke the credential between validation and reservation.
-                  reserveMcpCredential(threadId, existing.providerSessionId);
-                  const rawToken = existing.authorizationHeader.replace(/^Bearer\s+/, "");
-                  const resolved = yield* mcpSessionRegistry.resolve(rawToken);
-                  if (
-                    resolved !== undefined &&
-                    resolved.thread.threadId === threadId &&
-                    resolved.thread.providerInstanceId === providerInstanceId &&
-                    // A flipped browser-access setting must not survive through
-                    // credential reuse: rotate so the new scope reflects it.
-                    resolved.capabilities.has("preview") === browserToolsAvailable &&
-                    resolved.capabilities.has("device") === deviceToolsAvailable
-                  ) {
-                    return { mcpCredentialId: existing.providerSessionId, issued: false };
-                  }
-                  dropMcpCredentialReservation(threadId, existing.providerSessionId);
-                }
-                yield* mcpSessionRegistry.revokeThread(threadId);
-                const credential = yield* mcpSessionRegistry.issue({
-                  threadId,
-                  providerInstanceId,
-                  browserToolsAvailable,
-                  capabilities,
-                });
-                McpProviderSession.setMcpProviderSession(credential.config);
-                reserveMcpCredential(threadId, credential.config.providerSessionId);
-                return { mcpCredentialId: credential.config.providerSessionId, issued: true };
-              }),
+          ? withoutMcp(threadId)
+          : Effect.flatMap(isFusionSidekickThread(threadId, providerInstanceId), (sidekick) =>
+              sidekick ? withoutMcp(threadId) : prepareMcpCredential(threadId, providerInstanceId),
             );
+      /**
+       * Resolves (or mints) the thread's MCP credential and returns it with a
+       * reservation held; the caller must drop the reservation exactly once.
+       * Serialized per thread so two concurrent prepares cannot interleave
+       * their rotate steps and revoke each other's freshly minted credential.
+       */
+      const prepareMcpCredential = (
+        threadId: ThreadId,
+        providerInstanceId: ProviderInstanceId,
+      ): Effect.Effect<PreparedMcpCredential> =>
+        mcpPrepareLock.withLock(
+          threadId,
+          Effect.gen(function* () {
+            // Reuse a still-valid credential for this thread instead of
+            // rotating: long-lived provider processes (codex app-server)
+            // build their MCP client once per conversation and keep using
+            // the credential it started with, so a thread that detaches and
+            // re-attaches across a workspace handoff must come back to the
+            // same token or the process's tool calls fail auth.
+            const { browser: browserToolsAvailable, device: deviceToolsAvailable } =
+              yield* agentAccessSettings(threadId);
+            const capabilities = new Set<import("../mcp/McpInvocationContext.ts").McpCapability>([
+              "orchestration",
+              "worktree",
+              "pull-requests",
+            ]);
+            if (browserToolsAvailable) capabilities.add("preview");
+            if (deviceToolsAvailable) capabilities.add("device");
+            const existing = McpProviderSession.readMcpProviderSession(threadId);
+            if (existing !== undefined) {
+              // Reserve before the async resolve so a release cannot
+              // revoke the credential between validation and reservation.
+              reserveMcpCredential(threadId, existing.providerSessionId);
+              const rawToken = existing.authorizationHeader.replace(/^Bearer\s+/, "");
+              const resolved = yield* mcpSessionRegistry.resolve(rawToken);
+              if (
+                resolved !== undefined &&
+                resolved.thread.threadId === threadId &&
+                resolved.thread.providerInstanceId === providerInstanceId &&
+                // A flipped browser-access setting must not survive through
+                // credential reuse: rotate so the new scope reflects it.
+                resolved.capabilities.has("preview") === browserToolsAvailable &&
+                resolved.capabilities.has("device") === deviceToolsAvailable
+              ) {
+                return { mcpCredentialId: existing.providerSessionId, issued: false };
+              }
+              dropMcpCredentialReservation(threadId, existing.providerSessionId);
+            }
+            yield* mcpSessionRegistry.revokeThread(threadId);
+            const credential = yield* mcpSessionRegistry.issue({
+              threadId,
+              providerInstanceId,
+              browserToolsAvailable,
+              capabilities,
+            });
+            McpProviderSession.setMcpProviderSession(credential.config);
+            reserveMcpCredential(threadId, credential.config.providerSessionId);
+            return { mcpCredentialId: credential.config.providerSessionId, issued: true };
+          }),
+        );
       /**
        * With a credential id, revocation is scoped to that credential and the
        * config slot is cleared only while it still holds it; a replacement

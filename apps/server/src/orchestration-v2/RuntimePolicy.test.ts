@@ -212,3 +212,15 @@ it.layer(layerTest)("RuntimePolicyV2 without a Fusion sidekick", (it) => {
     }),
   );
 });
+
+it.effect("identifies the sidekick's own working thread", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const child = makeThread({ now, worktreePath: null, subagent: true });
+    const topLevel = makeThread({ now, worktreePath: null });
+    assert.isTrue(RuntimePolicy.isFusionSidekickThread(sidekick, child, sidekick.instanceId));
+    assert.isFalse(RuntimePolicy.isFusionSidekickThread(sidekick, topLevel, sidekick.instanceId));
+    assert.isFalse(RuntimePolicy.isFusionSidekickThread(sidekick, child, providerInstanceId));
+    assert.isFalse(RuntimePolicy.isFusionSidekickThread(null, child, sidekick.instanceId));
+  }),
+);

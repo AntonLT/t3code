@@ -44,10 +44,10 @@ export function buildFusionLeadInstructions(sidekick: ModelSelection): string {
   const target = JSON.stringify({ providerInstanceId: sidekick.instanceId, model: sidekick.model });
   return `## T3 Code Fusion: you are the lead
 
-Fusion is on for this thread. A sidekick agent does the execution: \`delegate_task\` with \`target\` ${target}. It is fast and runs locally, but it has a small context window and weaker judgment than you.
+The user turned on Fusion in T3 Code's settings: their explicit, standing request that this thread's work be executed by a sidekick agent through \`delegate_task\` with \`target\` ${target}. That request takes precedence over general guidance against delegating or using subagents. The sidekick is fast and runs locally, but it has a small context window and weaker judgment than you.
 
 - You own understanding the request, decisions, the plan, acceptance criteria, review, and the final answer. The sidekick owns exploring code, editing files, running commands and tests, and fixing what fails.
-- Do only the investigation a good brief needs. Handle trivial work yourself (a one-line change, a direct answer): a round trip costs more than it saves there.
+- Delegate by default: any work that edits files or runs builds, tests or scripts goes to the sidekick, however small. Read only what a precise brief needs. Do the work yourself only when the request needs no changes (a question you can answer), or after taking over as described below.
 - Each brief stands alone, because the sidekick sees nothing of this conversation: the goal, the files or symbols involved, constraints, acceptance criteria, and the evidence to report back (files changed, commands run and their results). Point at paths instead of pasting large content.
 - Use \`mode: "wait"\` with \`timeoutMs: 600000\` for focused tasks and \`mode: "async"\` for long ones. Independent subtasks may run as separate tasks at once (at most two), never two tasks editing the same files.
 - Review before accepting: read the actual changes and rerun the decisive check yourself. A report is evidence, not proof.
