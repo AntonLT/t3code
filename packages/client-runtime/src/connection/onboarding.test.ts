@@ -195,11 +195,11 @@ describe("connection onboarding", () => {
   ] as const)("preserves the $label grant when pairing a remote environment", ({ scopes }) =>
     Effect.gen(function* () {
       const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
-      const httpLayer = pairingHttpLayer(calls, { grantScopes: scopes });
+      const httpLayer = layerPairingHttp(calls, { grantScopes: scopes });
       const registration = yield* preparePairingRegistration({
         host: "remote.example.test",
         pairingCode: "pairing-token",
-      }).pipe(Effect.provide(Layer.mergeAll(CLIENT_PRESENTATION_LAYER, httpLayer)));
+      }).pipe(Effect.provide(Layer.mergeAll(layerClientPresentation, httpLayer)));
 
       const session = yield* fetchRemoteSessionState({
         httpBaseUrl: registration.profile.httpBaseUrl,
