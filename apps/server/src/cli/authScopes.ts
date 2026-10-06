@@ -1,5 +1,5 @@
 import { AuthEnvironmentScope } from "@t3tools/contracts";
-import { Flag } from "effect/unstable/cli";
+import { Flag } from "effect/cli";
 
 export const authScopesFlag = (defaults: ReadonlyArray<AuthEnvironmentScope>) =>
   Flag.Literals("scope", AuthEnvironmentScope.literals).pipe(
