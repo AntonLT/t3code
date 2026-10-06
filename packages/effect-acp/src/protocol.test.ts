@@ -537,6 +537,38 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
+  it.effect("answers an extension request whose handler also dies as an internal error", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio,
+        serverRequestMethods: new Set(),
+        // The typed failure must not hide the defect from its cleanup.
+        onExtRequest: () =>
+          Effect.fail(AcpError.AcpRequestError.invalidParams("bad params")).pipe(
+            Effect.ensuring(Effect.die(new Error("cleanup bug"))),
+          ),
+      });
+
+      yield* Queue.offer(
+        input,
+        yield* encodeJsonl(ExtRequest, {
+          jsonrpc: "2.0",
+          id: 9,
+          method: "x/test",
+          params: { hello: "world" },
+          headers: [],
+        }),
+      );
+
+      const response = yield* Schema.decodeUnknownEffect(
+        Schema.fromJsonString(JsonRpcErrorResponse),
+      )(yield* Queue.take(output));
+      assert.equal(response.id, 9);
+      assert.equal(response.error.code, -32603);
+    }),
+  );
+
   it.effect("preserves numeric ids for inbound extension requests", () =>
     Effect.gen(function* () {
       const { stdio, input, output } = yield* makeInMemoryStdio();

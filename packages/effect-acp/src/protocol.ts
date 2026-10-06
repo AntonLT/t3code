@@ -464,9 +464,10 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
       .pipe(
         Effect.matchCauseEffect({
           // A dying handler answers its own request, like a core handler, and
-          // leaves the reader running.
+          // leaves the reader running. A defect wins over a typed failure in
+          // the same cause, so it is never hidden behind an expected error.
           onFailure: (cause) => {
-            const failure = Cause.findErrorOption(cause);
+            const failure = Cause.hasDies(cause) ? Option.none() : Cause.findErrorOption(cause);
             if (Option.isSome(failure)) {
               return respondWithError(
                 message.id,
