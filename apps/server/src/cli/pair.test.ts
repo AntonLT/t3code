@@ -389,7 +389,7 @@ describe("auth scope options", () => {
         "orchestration:read",
         "--scope",
         "admin",
-      ]).pipe(Effect.provide(CliRuntimeLayer), Effect.flip);
+      ]).pipe(Effect.provide(layerCliRuntime), Effect.flip);
 
       if (!CliError.isCliError(error) || error._tag !== "ShowHelp") {
         assert.fail(`Expected ShowHelp, got ${String(error)}`);
