@@ -1,8 +1,9 @@
-import type { ProviderInteractionMode } from "@t3tools/contracts";
+import type { ModelSelection, ProviderInteractionMode } from "@t3tools/contracts";
 import type { V2TurnStartParams__AdditionalContextEntry } from "effect-codex-app-server/schema";
 import { buildRuntimeInstructions } from "./RuntimeInstructions.ts";
 
 import {
+  buildFusionLeadInstructions,
   T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
   T3_CODE_ORCHESTRATION_INSTRUCTIONS,
 } from "./T3OrchestrationInstructions.ts";
@@ -211,6 +212,8 @@ export function buildCodexAdditionalContext(
    * setting, so the prompt cannot claim tools the turn doesn't have.
    */
   toolsAvailable: boolean | T3CodeToolAvailability = true,
+  /** The Fusion sidekick this thread leads, from its runtime policy. */
+  fusionSidekick?: ModelSelection,
 ): Record<string, V2TurnStartParams__AdditionalContextEntry> {
   const tools = toolInstructions(toolsAvailable);
   // Separate keys keep each value under Codex's per-entry token cap.
@@ -221,5 +224,13 @@ export function buildCodexAdditionalContext(
       value: buildRuntimeInstructions({ harness: "Codex", ...runtime }),
     },
     ...(tools ? { t3_code_tools: { kind: "application", value: tools } } : {}),
+    ...(fusionSidekick
+      ? {
+          t3_code_fusion: {
+            kind: "application",
+            value: buildFusionLeadInstructions(fusionSidekick),
+          },
+        }
+      : {}),
   };
 }

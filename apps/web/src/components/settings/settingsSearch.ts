@@ -419,6 +419,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["queue steer running turn send default behavior composer"],
   },
   {
+    id: "fusion-sidekick",
+    title: "Fusion sidekick",
+    to: "/settings/general",
+    searchTerms: ["fusion lead sidekick delegate local model execution devin"],
+    scope: "environment-defaults",
+  },
+  {
     id: "provider-update-checks",
     title: "Provider update checks",
     to: "/settings/general",

@@ -104,6 +104,25 @@ describe("T3 browser developer instructions", () => {
   });
 });
 
+describe("Fusion lead context", () => {
+  const runtime = { model: "gpt-6-luna", reasoningEffort: "high" };
+  const sidekick = { instanceId: "pi", model: "local/qwen3.8-s" } as Parameters<
+    typeof buildCodexAdditionalContext
+  >[2] &
+    object;
+
+  it("briefs the lead with the exact delegate_task target", () => {
+    const fusion = buildCodexAdditionalContext(runtime, true, sidekick).t3_code_fusion?.value ?? "";
+    NodeAssert.match(fusion, /you are the lead/);
+    NodeAssert.match(fusion, /delegate_task/);
+    NodeAssert.ok(fusion.includes('{"providerInstanceId":"pi","model":"local/qwen3.8-s"}'));
+  });
+
+  it("adds nothing without a sidekick", () => {
+    NodeAssert.equal(buildCodexAdditionalContext(runtime, true).t3_code_fusion, undefined);
+  });
+});
+
 function runtimeInstructions(runtime: Parameters<typeof buildCodexAdditionalContext>[0]) {
   return buildCodexAdditionalContext(runtime).t3_code_runtime!.value;
 }

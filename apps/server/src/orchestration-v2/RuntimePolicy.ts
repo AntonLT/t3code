@@ -12,6 +12,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import {
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2RuntimePolicy as ProviderAdapterV2RuntimePolicyType,
@@ -87,15 +88,35 @@ function providerRuntimeMode(
     : "approval-required";
 }
 
+/**
+ * The sidekick a thread leads under Fusion, if any. Only top-level threads
+ * lead: a delegated child is the sidekick's own working context, and a thread
+ * already running on the sidekick's provider instance would only delegate to
+ * itself.
+ */
+export function resolveFusionSidekick(
+  sidekick: ModelSelection | null,
+  thread: OrchestrationV2AppThread,
+  modelSelection: ModelSelection,
+): ModelSelection | undefined {
+  if (sidekick === null) return undefined;
+  if (thread.lineage.relationshipToParent === "subagent") return undefined;
+  if (modelSelection.instanceId === sidekick.instanceId) return undefined;
+  return sidekick;
+}
+
 export const layerFromProjectStore: Layer.Layer<
   RuntimePolicyV2,
   never,
-  ProjectStore.ProjectStoreV2 | ProviderInstanceRegistry.ProviderInstanceRegistry
+  | ProjectStore.ProjectStoreV2
+  | ProviderInstanceRegistry.ProviderInstanceRegistry
+  | ServerSettings.ServerSettingsService
 > = Layer.effect(
   RuntimePolicyV2,
   Effect.gen(function* () {
     const projects = yield* ProjectStore.ProjectStoreV2;
     const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
+    const serverSettings = yield* ServerSettings.ServerSettingsService;
     return RuntimePolicyV2.of({
       resolve: Effect.fn("RuntimePolicyV2.resolve")(function* (input) {
         const instance = yield* providerInstances.getInstance(input.modelSelection.instanceId);
@@ -128,10 +149,20 @@ export const layerFromProjectStore: Layer.Layer<
               }),
             ),
           ));
+        // Unreadable settings leave Fusion off for this turn rather than failing it.
+        const fusionSidekick = resolveFusionSidekick(
+          yield* serverSettings.getSettings.pipe(
+            Effect.map((settings) => settings.fusionSidekick),
+            Effect.orElseSucceed(() => null),
+          ),
+          input.thread,
+          input.modelSelection,
+        );
         return ProviderAdapterV2RuntimePolicy.make({
           runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
           interactionMode: input.thread.interactionMode,
           cwd,
+          ...(fusionSidekick === undefined ? {} : { fusionSidekick }),
         });
       }),
     });

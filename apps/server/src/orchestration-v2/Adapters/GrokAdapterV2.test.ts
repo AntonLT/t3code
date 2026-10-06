@@ -29,6 +29,7 @@ import type { ProviderInstance } from "../../provider/ProviderDriver.ts";
 import * as ProviderInstanceRegistry from "../../provider/ProviderInstanceRegistry.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import { ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
+import * as ServerSettings from "../../serverSettings.ts";
 import * as RuntimePolicy from "../RuntimePolicy.ts";
 import { acpPermissionDisposition } from "../../provider/acp/AcpClientPolicy.ts";
 import {
@@ -437,6 +438,7 @@ describe("Grok launch permission mode", () => {
                   } as ProviderInstance),
               }),
             ),
+            Layer.provide(ServerSettings.layerTest()),
           ),
         ),
       );

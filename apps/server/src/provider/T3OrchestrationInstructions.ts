@@ -1,4 +1,4 @@
-import type { ProviderInteractionMode } from "@t3tools/contracts";
+import type { ModelSelection, ProviderInteractionMode } from "@t3tools/contracts";
 
 export const T3_CODE_ORCHESTRATION_INSTRUCTIONS = `
 
@@ -34,6 +34,26 @@ ACP fallback: some ACP agents accept the injected MCP server but fail to expose 
 
 When a chart, table, diagram, image collage, or mockup would say more than prose, build a self-contained HTML page, check it with \`html_preview\`, then publish it with \`html_render\` before your final reply. The reader sees the page above that reply, so don't announce or restate it; add only what it doesn't say.
 `;
+
+/**
+ * Fusion lead brief, sent only to a top-level thread while a sidekick is
+ * configured (`RuntimePolicy.resolveFusionSidekick`). The lead keeps judgment;
+ * the sidekick executes through ordinary `delegate_task` rounds.
+ */
+export function buildFusionLeadInstructions(sidekick: ModelSelection): string {
+  const target = JSON.stringify({ providerInstanceId: sidekick.instanceId, model: sidekick.model });
+  return `## T3 Code Fusion: you are the lead
+
+Fusion is on for this thread. A sidekick agent does the execution: \`delegate_task\` with \`target\` ${target}. It is fast and runs locally, but it has a small context window and weaker judgment than you.
+
+- You own understanding the request, decisions, the plan, acceptance criteria, review, and the final answer. The sidekick owns exploring code, editing files, running commands and tests, and fixing what fails.
+- Do only the investigation a good brief needs. Handle trivial work yourself (a one-line change, a direct answer): a round trip costs more than it saves there.
+- Each brief stands alone, because the sidekick sees nothing of this conversation: the goal, the files or symbols involved, constraints, acceptance criteria, and the evidence to report back (files changed, commands run and their results). Point at paths instead of pasting large content.
+- Use \`mode: "wait"\` with \`timeoutMs: 600000\` for focused tasks and \`mode: "async"\` for long ones. Independent subtasks may run as separate tasks at once (at most two), never two tasks editing the same files.
+- Review before accepting: read the actual changes and rerun the decisive check yourself. A report is evidence, not proof.
+- For corrections, start a new \`delegate_task\` round with the original brief, what is wrong, and the exact fix expected. After two unsuccessful rounds, or when the work needs judgment the sidekick lacks, take over and finish it yourself.
+- Decisions that need the user stay with you; the sidekick never delegates further.`;
+}
 
 export const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
 
