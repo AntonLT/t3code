@@ -213,6 +213,53 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;
 
+export const OrchestratorMcpSidekickInput = Schema.Struct({
+  message: OrchestratorMcpPrompt.annotate({
+    description:
+      "The brief (or, while a handoff is running, the update) for the sidekick: goal, plan, constraints, and how to verify.",
+  }),
+  block: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Defaults to true: wait for the handoff to finish and return the sidekick's report. false returns at once; the report arrives later as a notification or through read_sidekick.",
+  }),
+  timeoutMs: Schema.optional(Schema.Number).annotate({
+    description:
+      "Wait budget when blocking. Default 10 minutes, at most 60. Elapsing it never stops the sidekick.",
+  }),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpSidekickInput = typeof OrchestratorMcpSidekickInput.Type;
+
+export const OrchestratorMcpReadSidekickInput = Schema.Struct({
+  timeoutMs: Schema.optional(Schema.Number).annotate({
+    description:
+      "Wait budget. Default 10 minutes, at most 60. Elapsing it never stops the sidekick.",
+  }),
+});
+export type OrchestratorMcpReadSidekickInput = typeof OrchestratorMcpReadSidekickInput.Type;
+
+export const OrchestratorMcpSidekickResult = Schema.Struct({
+  outcome: Schema.Literals([
+    "finished",
+    "still_running",
+    "started",
+    "injected",
+    "finished_during_injection",
+  ]).annotate({
+    description:
+      "finished: the report is in `report`. still_running: the handoff continues in the background. started: a non-blocking handoff began. injected: the update reached the running handoff. finished_during_injection: the handoff ended before the update arrived, so it was not delivered; `report` holds the result.",
+  }),
+  handoff: Schema.Number.annotate({
+    description: "1 for the sidekick's first handoff, then 2, 3, …",
+  }),
+  taskId: NodeId,
+  childThreadId: ThreadId,
+  status: OrchestratorMcpDelegatedTaskStatus,
+  report: Schema.NullOr(Schema.String),
+  note: Schema.String,
+});
+export type OrchestratorMcpSidekickResult = typeof OrchestratorMcpSidekickResult.Type;
+
 export const OrchestratorMcpTaskStatusInput = Schema.Struct({
   taskId: NodeId,
 });

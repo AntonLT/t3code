@@ -111,11 +111,12 @@ describe("Fusion lead context", () => {
   >[2] &
     object;
 
-  it("briefs the lead with the exact delegate_task target", () => {
+  it("briefs the lead to hand off through the persistent sidekick tool", () => {
     const fusion = buildCodexAdditionalContext(runtime, true, sidekick).t3_code_fusion?.value ?? "";
     NodeAssert.match(fusion, /you are the lead/);
-    NodeAssert.match(fusion, /delegate_task/);
-    NodeAssert.ok(fusion.includes('{"providerInstanceId":"pi","model":"local/qwen3.8-s"}'));
+    NodeAssert.match(fusion, /`sidekick` tool: one persistent sidekick/);
+    NodeAssert.match(fusion, /read_sidekick/);
+    NodeAssert.ok(fusion.includes("local/qwen3.8-s"));
   });
 
   it("adds nothing without a sidekick", () => {

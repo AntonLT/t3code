@@ -6650,6 +6650,76 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: taskTurnItem,
       });
 
+      if (command.continueFromThreadId !== undefined) {
+        // The new child continues an earlier child's conversation: a pending fork transfer from that child's latest
+        // settled run, which the message dispatch below resolves (natively when the provider can fork).
+        const source = yield* projectionStore
+          .getThreadRecords(command.continueFromThreadId, [
+            "runs",
+            "providerThreads",
+            "providerTurns",
+            "attempts",
+          ])
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestratorProjectionError({
+                  threadId: command.continueFromThreadId!,
+                  cause,
+                }),
+            ),
+          );
+        const sourceRun = source.runs
+          .filter((run) => isForkableSourceRunStatus(run.status))
+          .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+        if (
+          source.thread.lineage.relationshipToParent !== "subagent" ||
+          source.thread.lineage.parentThreadId !== command.parentThreadId ||
+          sourceRun === undefined
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Thread ${command.continueFromThreadId} is not a settled child of ${command.parentThreadId}.`,
+          });
+        }
+        const sourceProviderThread = providerThreadForRun(source, sourceRun);
+        const forkTransferId = yield* mapDispatchError(command)(
+          idAllocator.allocate.contextTransfer({
+            sourceThreadId: source.thread.id,
+            targetThreadId: childThreadId,
+            type: "fork",
+          }),
+        );
+        yield* emitEvent({
+          type: "context-transfer.created",
+          threadId: childThreadId,
+          providerInstanceId: sourceRun.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: forkTransferId,
+            type: "fork",
+            sourceThreadId: source.thread.id,
+            targetThreadId: childThreadId,
+            sourcePoint: contextSourcePointForRun(source, sourceRun),
+            basePoint: null,
+            sourceProviderInstanceId: sourceRun.providerInstanceId,
+            targetProviderInstanceId: null,
+            targetRunId: null,
+            status: "pending",
+            resolution: null,
+            createdBy: command.createdBy,
+            error:
+              sourceProviderThread?.nativeThreadRef?.strength === "strong"
+                ? null
+                : "Source provider thread does not expose a strong native thread ref.",
+            createdAt: now,
+            updatedAt: now,
+            consumedAt: null,
+          },
+        });
+      }
+
       const childMessageCommand = {
         type: "message.dispatch",
         createdBy: command.createdBy,

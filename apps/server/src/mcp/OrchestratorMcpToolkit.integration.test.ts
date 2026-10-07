@@ -17,6 +17,7 @@ import {
   type OrchestrationV2ThreadProjection,
   OrchestratorMcpCreateThreadsResult,
   OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpSidekickResult,
   OrchestratorMcpTaskCancelResult,
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadListResult,
@@ -75,6 +76,7 @@ import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMoc
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
@@ -103,6 +105,7 @@ const queuedFollowupResult = "Queued delegated follow-up completed.";
 
 const decodeCreateThreadsResult = Schema.decodeUnknownEffect(OrchestratorMcpCreateThreadsResult);
 const decodeDelegateTaskResult = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskResult);
+const decodeSidekickResult = Schema.decodeUnknownEffect(OrchestratorMcpSidekickResult);
 const decodeTaskCancelResult = Schema.decodeUnknownEffect(OrchestratorMcpTaskCancelResult);
 const decodeThreadInterruptResult = Schema.decodeUnknownEffect(
   OrchestratorMcpThreadInterruptResult,
@@ -188,6 +191,13 @@ function makeDeterministicAdapter(input: {
   readonly shouldComplete: (turn: ProviderAdapterV2TurnInput) => boolean;
   readonly terminalGate?: (turn: ProviderAdapterV2TurnInput) => Deferred.Deferred<void> | undefined;
   readonly response: (turn: ProviderAdapterV2TurnInput) => string;
+  /** Records native forks (source thread → target thread) and steered messages; forks are unsupported without it. */
+  readonly forks?: Ref.Ref<
+    ReadonlyArray<{ readonly from: ThreadId | null; readonly to: ThreadId }>
+  >;
+  readonly steered?: Ref.Ref<ReadonlyArray<string>>;
+  /** Return from startTurn at once and finish gated turns in the background, as a live provider does. */
+  readonly backgroundTurns?: boolean;
 }): ProviderAdapterV2Shape {
   return {
     instanceId: input.instanceId,
@@ -289,73 +299,84 @@ function makeDeterministicAdapter(input: {
                 },
               ]);
               const terminalGate = input.terminalGate?.(turnInput);
-              if (terminalGate !== undefined) {
-                yield* Deferred.await(terminalGate);
-              } else if (!input.shouldComplete(turnInput)) {
+              if (terminalGate === undefined && !input.shouldComplete(turnInput)) {
                 return;
               }
-              const response = input.response(turnInput);
-              yield* publish([
-                {
-                  type: "provider_turn.updated",
-                  driver: input.driver,
-                  providerTurn: {
-                    id: providerTurnId,
-                    providerThreadId: turnInput.providerThread.id,
-                    nodeId: turnInput.rootNodeId,
-                    runAttemptId: turnInput.attemptId,
-                    nativeTurnRef: {
-                      driver: input.driver,
-                      nativeId: `native-turn:${turnInput.threadId}:${turnInput.runOrdinal}`,
-                      strength: "strong",
+              const finish = Effect.gen(function* () {
+                if (terminalGate !== undefined) {
+                  yield* Deferred.await(terminalGate);
+                }
+                const response = input.response(turnInput);
+                yield* publish([
+                  {
+                    type: "provider_turn.updated",
+                    driver: input.driver,
+                    providerTurn: {
+                      id: providerTurnId,
+                      providerThreadId: turnInput.providerThread.id,
+                      nodeId: turnInput.rootNodeId,
+                      runAttemptId: turnInput.attemptId,
+                      nativeTurnRef: {
+                        driver: input.driver,
+                        nativeId: `native-turn:${turnInput.threadId}:${turnInput.runOrdinal}`,
+                        strength: "strong",
+                      },
+                      ordinal: turnInput.providerTurnOrdinal,
+                      status: "completed",
+                      startedAt: eventTime,
+                      completedAt: eventTime,
                     },
-                    ordinal: turnInput.providerTurnOrdinal,
-                    status: "completed",
-                    startedAt: eventTime,
-                    completedAt: eventTime,
                   },
-                },
-                {
-                  type: "turn_item.updated",
-                  driver: input.driver,
-                  turnItem: {
-                    id: TurnItemId.make(
-                      `turn-item:${input.instanceId}:${turnInput.threadId}:${turnInput.runOrdinal}:assistant`,
-                    ),
-                    threadId: turnInput.threadId,
-                    runId: turnInput.runId,
-                    nodeId: turnInput.rootNodeId,
+                  {
+                    type: "turn_item.updated",
+                    driver: input.driver,
+                    turnItem: {
+                      id: TurnItemId.make(
+                        `turn-item:${input.instanceId}:${turnInput.threadId}:${turnInput.runOrdinal}:assistant`,
+                      ),
+                      threadId: turnInput.threadId,
+                      runId: turnInput.runId,
+                      nodeId: turnInput.rootNodeId,
+                      providerThreadId: turnInput.providerThread.id,
+                      providerTurnId,
+                      nativeItemRef: null,
+                      parentItemId: null,
+                      ordinal: turnInput.runOrdinal * 100 + 1,
+                      status: "completed",
+                      title: null,
+                      startedAt: eventTime,
+                      completedAt: eventTime,
+                      updatedAt: eventTime,
+                      type: "assistant_message",
+                      messageId: MessageId.make(
+                        `message:${input.instanceId}:${turnInput.threadId}:${turnInput.runOrdinal}:assistant`,
+                      ),
+                      text: response,
+                      streaming: false,
+                    },
+                  },
+                  {
+                    type: "turn.terminal",
+                    driver: input.driver,
                     providerThreadId: turnInput.providerThread.id,
                     providerTurnId,
-                    nativeItemRef: null,
-                    parentItemId: null,
-                    ordinal: turnInput.runOrdinal * 100 + 1,
+                    runOrdinal: turnInput.runOrdinal,
                     status: "completed",
-                    title: null,
-                    startedAt: eventTime,
-                    completedAt: eventTime,
-                    updatedAt: eventTime,
-                    type: "assistant_message",
-                    messageId: MessageId.make(
-                      `message:${input.instanceId}:${turnInput.threadId}:${turnInput.runOrdinal}:assistant`,
-                    ),
-                    text: response,
-                    streaming: false,
+                    failure: null,
+                    threadDisposition: "reusable",
                   },
-                },
-                {
-                  type: "turn.terminal",
-                  driver: input.driver,
-                  providerThreadId: turnInput.providerThread.id,
-                  providerTurnId,
-                  runOrdinal: turnInput.runOrdinal,
-                  status: "completed",
-                  failure: null,
-                  threadDisposition: "reusable",
-                },
-              ]);
+                ]);
+              });
+              if (input.backgroundTurns === true && terminalGate !== undefined) {
+                yield* Effect.forkDetach(finish);
+              } else {
+                yield* finish;
+              }
             }),
-          steerTurn: () => Effect.void,
+          steerTurn: (steerInput) =>
+            input.steered === undefined
+              ? Effect.void
+              : Ref.update(input.steered, (all) => [...all, steerInput.message.text]),
           interruptTurn: ({ providerThread, providerTurnId }) =>
             Effect.gen(function* () {
               const turnInput = turnInputs.get(providerTurnId);
@@ -400,7 +421,37 @@ function makeDeterministicAdapter(input: {
           readThreadSnapshot: () =>
             unsupported(input.driver, "readThreadSnapshot is unused in this test"),
           rollbackThread: () => unsupported(input.driver, "rollbackThread is unused in this test"),
-          forkThread: () => unsupported(input.driver, "forkThread is unused in this test"),
+          forkThread: (forkInput) => {
+            const forks = input.forks;
+            if (forks === undefined) {
+              return unsupported(input.driver, "forkThread is unused in this test");
+            }
+            return Effect.gen(function* () {
+              yield* Ref.update(forks, (all) => [
+                ...all,
+                { from: forkInput.sourceProviderThread.appThreadId, to: forkInput.targetThreadId },
+              ]);
+              const createdAt = yield* DateTime.now;
+              const nativeThreadId = `${input.driver}:${forkInput.targetThreadId}`;
+              return {
+                ...forkInput.sourceProviderThread,
+                id: ProviderThreadId.make(`provider-thread:${nativeThreadId}`),
+                providerSessionId: sessionInput.providerSessionId,
+                appThreadId: forkInput.targetThreadId,
+                nativeThreadRef: {
+                  driver: input.driver,
+                  nativeId: nativeThreadId,
+                  strength: "strong",
+                },
+                status: "idle",
+                firstRunOrdinal: null,
+                lastRunOrdinal: null,
+                handoffIds: [],
+                createdAt,
+                updatedAt: createdAt,
+              } satisfies OrchestrationV2ProviderThread;
+            });
+          },
         };
       }),
   };
@@ -692,6 +743,7 @@ describe("orchestrator MCP toolkit", () => {
                   ),
               }),
             ),
+            Layer.provide(ServerSettings.layerTest()),
             Layer.provideMerge(
               SecretRequests.layer.pipe(
                 Layer.provide(layerMemorySecretStore),
@@ -3736,6 +3788,207 @@ describe("orchestrator MCP toolkit", () => {
       ),
   );
 
+  it.live(
+    "Fusion keeps one persistent sidekick: handoffs fork its conversation, calls mid-handoff inject updates",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace("fusion-sidekick");
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const forks = yield* Ref.make<ReadonlyArray<{ from: ThreadId | null; to: ThreadId }>>([]);
+          const steered = yield* Ref.make<ReadonlyArray<string>>([]);
+          const secondHandoffGate = yield* Deferred.make<void>();
+          const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+            makeDeterministicAdapter({
+              instanceId: codexInstanceId,
+              driver: ProviderDriverKind.make("codex"),
+              capabilities: CodexProviderCapabilitiesV2,
+              capturedTurns,
+              shouldComplete: (turn) => turn.threadId !== parentThreadId,
+              response: (turn) => `Codex completed: ${turn.message.text}`,
+            }),
+            makeDeterministicAdapter({
+              instanceId: claudeInstanceId,
+              driver: ProviderDriverKind.make("claudeAgent"),
+              capabilities: ClaudeProviderCapabilitiesV2,
+              capturedTurns,
+              forks,
+              steered,
+              backgroundTurns: true,
+              shouldComplete: () => true,
+              terminalGate: (turn) =>
+                turn.message.text.includes("Add the export command")
+                  ? secondHandoffGate
+                  : undefined,
+              response: (turn) =>
+                turn.message.text.includes("Add the export command")
+                  ? "Export command added; 4 tests pass."
+                  : "Parser refactored; 3 tests pass.",
+            }),
+          ]);
+          const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
+            { name: "fusion-sidekick", runtimePolicyOverride: { cwd } },
+            layerRegistry,
+          );
+          const layerOrchestration = Layer.merge(
+            layerOrchestrator,
+            ThreadManagementService.layer.pipe(Layer.provide(layerOrchestrator)),
+          );
+          const layerTest = McpHttpServer.layerOrchestratorToolkit.pipe(
+            Layer.provideMerge(McpServer.McpServer.layer),
+            Layer.provideMerge(layerOrchestration),
+            Layer.provide(layerRegistry),
+            Layer.provide(
+              ProviderRegistryMock.layer([
+                makeProviderSnapshot({
+                  instanceId: codexInstanceId,
+                  driver: ProviderDriverKind.make("codex"),
+                  model: codexModel,
+                }),
+                makeProviderSnapshot({
+                  instanceId: claudeInstanceId,
+                  driver: ProviderDriverKind.make("claudeAgent"),
+                  model: claudeModel,
+                }),
+              ]),
+            ),
+            Layer.provide(layerUnusedScheduledTaskStub),
+            Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+            Layer.provide(ServerSettings.layerTest({ fusionSidekick: claudeSelection })),
+            Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+            Layer.provide(NodeServices.layer),
+          );
+
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const server = yield* McpServer.McpServer;
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:fusion-lead:create"),
+              threadId: parentThreadId,
+              projectId,
+              title: "Fusion lead",
+              modelSelection: codexSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:fusion-lead:start"),
+              threadId: parentThreadId,
+              messageId: MessageId.make("message:fusion-lead:start"),
+              text: parentPrompt,
+              attachments: [],
+              modelSelection: codexSelection,
+              dispatchMode: { type: "start_immediately" },
+            });
+            yield* waitForProjection(orchestrator, parentThreadId, (projection) =>
+              projection.providerTurns.some((turn) => turn.status === "running"),
+            );
+            const invocation: McpInvocationContext.McpInvocationScope = {
+              environmentId: EnvironmentId.make("environment:fusion"),
+              requestNamespace: "mcp-provider-session-fusion-lead",
+              thread: {
+                threadId: parentThreadId,
+                providerSessionId: "mcp-provider-session-fusion-lead",
+                providerInstanceId: codexInstanceId,
+              },
+              client: undefined,
+              capabilities: new Set(["orchestration"]),
+              issuedAt: 1,
+            };
+            const invoke = (name: string, args: Record<string, unknown>) =>
+              server
+                .callTool({ name, arguments: args })
+                .pipe(
+                  Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+                  Effect.provideService(McpSchema.McpServerClient, client),
+                );
+            const sidekick = (args: Record<string, unknown>) =>
+              invoke("sidekick", args).pipe(
+                Effect.flatMap((result) =>
+                  decodeSidekickResult(result.structuredContent).pipe(Effect.orDie),
+                ),
+              );
+            const childTurns = (threadId: ThreadId) =>
+              Ref.get(capturedTurns).pipe(
+                Effect.map((turns) => turns.filter((turn) => turn.threadId === threadId)),
+              );
+
+            // Handoff 1 blocks and returns the report; the brief carries the sidekick's role.
+            const first = yield* sidekick({ message: "Refactor the parser.", timeoutMs: 30_000 });
+            expect(first).toMatchObject({
+              outcome: "finished",
+              handoff: 1,
+              status: "completed",
+              report: "Parser refactored; 3 tests pass.",
+            });
+            const [firstTurn] = yield* childTurns(first.childThreadId);
+            expect(firstTurn?.text).toContain("You are the sidekick");
+            expect(firstTurn?.text).toContain("This is your first handoff from the lead");
+            expect(firstTurn?.text).toContain("Refactor the parser.");
+
+            // Handoff 2 continues the same conversation: a native fork of handoff 1's thread.
+            const second = yield* sidekick({ message: "Add the export command.", block: false });
+            expect(second).toMatchObject({ outcome: "started", handoff: 2 });
+            expect(second.childThreadId).not.toBe(first.childThreadId);
+            yield* waitForProjection(orchestrator, second.childThreadId, (projection) =>
+              projection.providerTurns.some((turn) => turn.status === "running"),
+            );
+            expect(yield* Ref.get(forks)).toEqual([
+              { from: first.childThreadId, to: second.childThreadId },
+            ]);
+            const [secondTurn] = yield* childTurns(second.childThreadId);
+            expect(secondTurn?.text).toContain("continuing from your previous context");
+            expect(secondTurn?.text).not.toContain("You are the sidekick");
+
+            // A call while it runs is an update steered into the running handoff, not a second sidekick.
+            const update = yield* sidekick({ message: "Use tabs, not spaces.", block: false });
+            expect(update).toMatchObject({
+              outcome: "injected",
+              handoff: 2,
+              taskId: second.taskId,
+            });
+            // The steer lands through the provider-turn effect after the dispatch returns.
+            let steeredTexts = yield* Ref.get(steered);
+            for (let attempt = 0; attempt < 1_000 && steeredTexts.length === 0; attempt += 1) {
+              yield* Effect.sleep("5 millis");
+              steeredTexts = yield* Ref.get(steered);
+            }
+            expect(steeredTexts).toHaveLength(1);
+            expect(steeredTexts[0]).toContain("The lead sent an update");
+            expect(steeredTexts[0]).toContain("Use tabs, not spaces.");
+
+            yield* Deferred.succeed(secondHandoffGate, undefined);
+            const report = yield* invoke("read_sidekick", { timeoutMs: 30_000 }).pipe(
+              Effect.flatMap((result) =>
+                decodeSidekickResult(result.structuredContent).pipe(Effect.orDie),
+              ),
+            );
+            expect(report).toMatchObject({
+              outcome: "finished",
+              handoff: 2,
+              report: "Export command added; 4 tests pass.",
+            });
+
+            // The generic tool cannot start a second sidekick on the sidekick's instance.
+            const refused = yield* invoke("delegate_task", {
+              task: "Write the docs.",
+              target: { providerInstanceId: claudeInstanceId, model: claudeModel },
+            });
+            expect(refused.isError).toBe(true);
+            expect(declaredFailure(refused)).toMatchObject({ code: "invalid_request" });
+          }).pipe(Effect.provide(layerTest));
+        }),
+      ),
+  );
+
   it.live("reports running and queued child follow-ups from a Codex replay transcript", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -3773,6 +4026,7 @@ describe("orchestrator MCP toolkit", () => {
           Layer.provide(layerProviderRegistry),
           Layer.provide(layerUnusedScheduledTaskStub),
           Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+          Layer.provide(ServerSettings.layerTest()),
           Layer.provideMerge(
             SecretRequests.layer.pipe(
               Layer.provide(layerMemorySecretStore),

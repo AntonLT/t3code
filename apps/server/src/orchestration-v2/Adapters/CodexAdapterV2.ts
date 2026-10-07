@@ -104,6 +104,7 @@ import {
   shouldPersistProviderEvent,
 } from "../../provider/EventNdjsonLogger.ts";
 import { ProviderEventLoggers } from "../../provider/ProviderEventLoggers.ts";
+import { FUSION_DIRECT_EDIT_REMINDER } from "../../provider/T3OrchestrationInstructions.ts";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "../../provider/codexLaunchArgs.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
@@ -1751,6 +1752,8 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           new Map<ProviderThreadId, Extract<OrchestrationV2TurnItem, { type: "error" }>>(),
         );
         const activeTurns = yield* Ref.make(new Map<string, ActiveCodexTurnContext>());
+        // Fusion lead turns already reminded to delegate after editing a file themselves.
+        const fusionEditReminded = new Set<string>();
         const turnTokenUsageByThread = new Map<string, CodexTurnTokenUsageState>();
         const usageStateForThread = (nativeThreadId: string) => {
           let state = turnTokenUsageByThread.get(nativeThreadId);
@@ -4553,6 +4556,30 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               const artifacts = yield* buildFileChangeArtifacts(context, payload.item);
               if (artifacts === null) {
                 return;
+              }
+              const nativeThreadId = context.providerThread.nativeThreadRef?.nativeId;
+              if (
+                context.subagent === null &&
+                context.input.runtimePolicy.fusionSidekick !== undefined &&
+                nativeThreadId != null &&
+                !fusionEditReminded.has(context.nativeTurnId)
+              ) {
+                // A Fusion lead edited a file itself: steer one reminder into the turn to hand
+                // implementation to the sidekick. Forked so this notification handler never waits
+                // on its own connection.
+                fusionEditReminded.add(context.nativeTurnId);
+                yield* client
+                  .request("turn/steer", {
+                    expectedTurnId: context.nativeTurnId,
+                    input: [{ type: "text", text: FUSION_DIRECT_EDIT_REMINDER }],
+                    threadId: nativeThreadId,
+                  })
+                  .pipe(
+                    Effect.catchCause((cause) =>
+                      Effect.logWarning("codex.fusion-edit-reminder-failed", { cause }),
+                    ),
+                    Effect.forkDetach,
+                  );
               }
               yield* emitProviderEvent({
                 type: "node.updated",

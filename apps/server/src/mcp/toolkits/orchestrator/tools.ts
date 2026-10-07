@@ -13,6 +13,9 @@ import {
   OrchestratorMcpListScheduledTasksResult,
   OrchestratorMcpScheduleTaskInput,
   OrchestratorMcpScheduleTaskResult,
+  OrchestratorMcpReadSidekickInput,
+  OrchestratorMcpSidekickInput,
+  OrchestratorMcpSidekickResult,
   OrchestratorMcpTaskCancelInput,
   OrchestratorMcpTaskCancelResult,
   OrchestratorMcpUpdateScheduledTaskInput,
@@ -73,6 +76,33 @@ export const DelegateTaskTool = Tool.make("delegate_task", {
   .annotate(Tool.Title, "Delegate a child task")
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
+
+export const SidekickTool = Tool.make("sidekick", {
+  description:
+    "Fusion only (the user turned it on in T3 Code's settings). Hand work off to this thread's persistent sidekick agent. There is exactly one sidekick per thread; it works in the same checkout, and its conversation persists across handoffs, so later briefs need not repeat context it already has. With block=true (the default) the call waits and returns the sidekick's report. With block=false it returns at once and the report arrives later as a notification; when you run out of independent work, wait for it with read_sidekick rather than polling or guessing. Calling this again while a handoff is running injects the message into that handoff as an update instead of starting a second sidekick. A timeout never stops the sidekick. The sidekick cannot talk to the user and does not commit, push, or handle pull requests; those stay with you.",
+  parameters: OrchestratorMcpSidekickInput,
+  success: OrchestratorMcpSidekickResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Hand off to the sidekick")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
+const ReadSidekickTool = Tool.make("read_sidekick", {
+  description:
+    "Fusion only. Wait for the sidekick's running handoff to finish and return its report, or return the last report when it is idle. A timeout returns still_running and never stops the sidekick. Use the default timeout unless you have a reason not to.",
+  parameters: OrchestratorMcpReadSidekickInput,
+  success: OrchestratorMcpSidekickResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Read the sidekick's report")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
 
 const TaskStatusTool = Tool.make("task_status", {
   description:
@@ -259,6 +289,8 @@ const ThreadInterruptTool = Tool.make("t3_thread_interrupt", {
 export const OrchestratorToolkit = Toolkit.make(
   OrchestratorCapabilitiesTool,
   DelegateTaskTool,
+  SidekickTool,
+  ReadSidekickTool,
   TaskStatusTool,
   TaskCancelTool,
   ScheduleTaskTool,

@@ -28,6 +28,9 @@ import {
   type OrchestratorMcpScheduledTask,
   type OrchestratorMcpScheduleTaskInput,
   type OrchestratorMcpScheduleTaskResult,
+  type OrchestratorMcpReadSidekickInput,
+  type OrchestratorMcpSidekickInput,
+  type OrchestratorMcpSidekickResult,
   type OrchestratorMcpTarget,
   type OrchestratorMcpTaskCancelInput,
   type OrchestratorMcpTaskCancelResult,
@@ -71,6 +74,13 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import { resolveFusionSidekick } from "../orchestration-v2/RuntimePolicy.ts";
+import {
+  fusionFirstHandoff,
+  fusionHandoffUpdate,
+  fusionNextHandoff,
+} from "../provider/T3OrchestrationInstructions.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import {
   subagentResultForRun,
   delegatedTaskProgress,
@@ -126,6 +136,16 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpDelegateTaskInput,
   ) => Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure>;
+  /** Fusion: hand work to (or update) this lead thread's one persistent sidekick. */
+  readonly sidekick: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpSidekickInput,
+  ) => Effect.Effect<OrchestratorMcpSidekickResult, OrchestratorMcpFailure>;
+  /** Fusion: wait for the sidekick's current handoff, or read its last report. */
+  readonly readSidekick: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpReadSidekickInput,
+  ) => Effect.Effect<OrchestratorMcpSidekickResult, OrchestratorMcpFailure>;
   readonly taskStatus: (
     scope: McpInvocationScope,
     taskId: NodeId,
@@ -373,6 +393,39 @@ export function hasPendingChildRuns(
       !ThreadManagementService.isTerminalRunStatus(run.status) &&
       (delegatedRun === undefined || run.ordinal > delegatedRun.ordinal),
   );
+}
+
+const SIDEKICK_NOTES: Record<OrchestratorMcpSidekickResult["outcome"], string> = {
+  finished:
+    "The sidekick finished the handoff. Review its report and the actual changes before your next action.",
+  still_running:
+    "The sidekick is still working; the handoff continues in the background. Its report arrives as a notification, or wait for it with read_sidekick. Do not poll or guess at the report.",
+  started:
+    "Handoff started in the background. Do lead work that is independent of it; when you need the report, wait with read_sidekick.",
+  injected:
+    "The update was injected into the running handoff. The sidekick folds it in, and its report covers it.",
+  finished_during_injection:
+    "The sidekick finished just as the update was being delivered, so it did not receive it. Its report is below; send the update as a new handoff if it still applies.",
+};
+
+function sidekickResult(
+  outcome: OrchestratorMcpSidekickResult["outcome"],
+  handoff: number,
+  task: OrchestratorMcpDelegateTaskResult,
+): OrchestratorMcpSidekickResult {
+  const settled = outcome === "finished" || outcome === "finished_during_injection";
+  return {
+    outcome,
+    handoff,
+    taskId: task.taskId,
+    childThreadId: task.childThreadId,
+    status: task.status,
+    report: settled ? task.summary : null,
+    note:
+      settled && task.status !== "completed"
+        ? `${SIDEKICK_NOTES[outcome]} The handoff ended with status ${task.status}.`
+        : SIDEKICK_NOTES[outcome],
+  };
 }
 
 function isTerminalTaskStatus(
@@ -811,6 +864,7 @@ const make = Effect.gen(function* () {
   const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
   const projects = yield* ProjectService.ProjectService;
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
 
   /** A caller-named project, which must exist before anything is recorded against it. */
   const requireProject = (projectId: ProjectId) =>
@@ -1463,6 +1517,190 @@ const make = Effect.gen(function* () {
       return task;
     });
 
+  /** The caller's active run, which owns any task it delegates. */
+  const activeParentRun = (
+    scope: McpThreadInvocationScope,
+    parent: Pick<OrchestrationV2ThreadProjection, "runs">,
+  ) => {
+    const parentRun = parent.runs
+      .filter(ThreadManagementService.isActiveRun)
+      .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+    return parentRun === undefined ||
+      parentRun.rootNodeId === null ||
+      parentRun.providerInstanceId !== scope.thread.providerInstanceId
+      ? Effect.fail(
+          failure(
+            "parent_not_active",
+            "Delegated tasks require an active run owned by this MCP provider session.",
+          ),
+        )
+      : Effect.succeed(parentRun as OrchestrationV2Run & { readonly rootNodeId: NodeId });
+  };
+
+  /** The sidekick this thread leads under Fusion; unreadable settings leave Fusion off. */
+  const fusionSidekickOf = (parent: Pick<OrchestrationV2ThreadProjection, "thread">) =>
+    serverSettings.getSettings.pipe(
+      Effect.map((settings) =>
+        resolveFusionSidekick(settings.fusionSidekick, parent.thread, parent.thread.modelSelection),
+      ),
+      Effect.orElseSucceed(() => undefined),
+    );
+
+  const requireFusionSidekick = (parent: Pick<OrchestrationV2ThreadProjection, "thread">) =>
+    Effect.flatMap(fusionSidekickOf(parent), (sidekick) =>
+      sidekick === undefined
+        ? Effect.fail(
+            failure(
+              "capability_denied",
+              "The sidekick is not available: Fusion is off for this thread (Settings → General → Fusion).",
+            ),
+          )
+        : Effect.succeed(sidekick),
+    );
+
+  /** This lead's sidekick handoffs, oldest first: its app-owned tasks on the sidekick's instance. */
+  const sidekickHandoffs = (
+    parent: Pick<OrchestrationV2ThreadProjection, "subagents">,
+    sidekick: ModelSelection,
+  ) =>
+    parent.subagents
+      .filter(
+        (task) =>
+          task.origin === "app_owned" &&
+          task.providerInstanceId === sidekick.instanceId &&
+          task.childThreadId !== null,
+      )
+      .toSorted(
+        (left, right) =>
+          DateTime.toEpochMillis(left.startedAt ?? left.updatedAt) -
+          DateTime.toEpochMillis(right.startedAt ?? right.updatedAt),
+      );
+
+  /**
+   * Waits for a delegated task to settle. When the budget elapses first, the blocking call no longer owns delivery,
+   * so the task's completion wake is upgraded: a later terminal then wakes the parent even mid-turn. Best effort; on
+   * failure the settled_only policy still wakes a settled parent.
+   */
+  const waitUpgradingWake = (
+    scope: McpThreadInvocationScope,
+    key: string,
+    taskId: NodeId,
+    timeoutMs: number | undefined,
+  ) =>
+    Effect.gen(function* () {
+      const budget = Math.min(
+        MAX_WAIT_TIMEOUT_MS,
+        Math.max(1, timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
+      );
+      const waited = yield* waitForTask(scope, taskId, budget);
+      if (Option.isSome(waited)) {
+        return waited.value;
+      }
+      yield* threadManagement
+        .dispatch({
+          type: "delegated_task.wake-policy",
+          commandId: stableCommandId({
+            scope,
+            requestKey: key,
+            operation: "delegate-task-wake-policy",
+          }),
+          parentThreadId: scope.thread.threadId,
+          taskId,
+          completionWake: "always",
+        })
+        .pipe(
+          // The tool result is the timed-out task either way, so failures
+          // stay warnings. Keep the two shapes apart: a rejected receipt
+          // means this exact command id already failed (a replay of a
+          // no-op upgrade), while anything else is a fresh dispatch fault.
+          Effect.catch((error) =>
+            Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
+              taskId,
+              outcome:
+                error._tag === "OrchestratorCommandPreviouslyRejectedError"
+                  ? "previously_rejected"
+                  : "dispatch_failed",
+              error,
+            }),
+          ),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
+              taskId,
+              outcome: "defect",
+              cause,
+            }),
+          ),
+        );
+      return yield* readTask(scope, taskId, true, true);
+    });
+
+  /** Dispatches one delegated task; with `wait`, blocks until it settles or the budget elapses. */
+  const startDelegatedTask = (input: {
+    readonly scope: McpThreadInvocationScope;
+    readonly parentRun: OrchestrationV2Run & { readonly rootNodeId: NodeId };
+    readonly requestKey: string;
+    readonly task: string;
+    readonly title: string | undefined;
+    readonly modelSelection: ModelSelection;
+    readonly runtimeMode: RuntimeMode;
+    readonly interactionMode: ProviderInteractionMode;
+    readonly wait: boolean;
+    readonly timeoutMs: number | undefined;
+    readonly continueFromThreadId?: ThreadId;
+  }) =>
+    Effect.gen(function* () {
+      const { scope } = input;
+      const result = yield* threadManagement
+        .dispatch({
+          type: "delegated_task.request",
+          createdBy: "agent",
+          creationSource: "mcp",
+          commandId: stableCommandId({
+            scope,
+            requestKey: input.requestKey,
+            operation: "delegate-task",
+          }),
+          parentThreadId: scope.thread.threadId,
+          parentRunId: input.parentRun.id,
+          parentNodeId: input.parentRun.rootNodeId,
+          task: input.task,
+          ...(input.title === undefined ? {} : { title: input.title }),
+          modelSelection: input.modelSelection,
+          runtimeMode: input.runtimeMode,
+          interactionMode: input.interactionMode,
+          // Async delegations wake the parent on every child terminal; wait
+          // delegations deliver through the blocking tool call, so a wake is
+          // only needed if the parent settled first (timeout, disconnect).
+          completionWake: input.wait ? "settled_only" : "always",
+          ...(input.continueFromThreadId === undefined
+            ? {}
+            : { continueFromThreadId: input.continueFromThreadId }),
+        })
+        .pipe(
+          Effect.mapError((error) =>
+            failure(
+              "orchestration_error",
+              `Unable to create delegated task: ${errorMessage(error)}`,
+            ),
+          ),
+        );
+      const taskEvent = result.storedEvents.find(
+        (stored) =>
+          stored.event.type === "subagent.updated" && stored.event.payload.origin === "app_owned",
+      );
+      if (taskEvent?.event.type !== "subagent.updated") {
+        return yield* failure(
+          "orchestration_error",
+          "Delegated task command did not produce a task projection.",
+        );
+      }
+      const taskId = taskEvent.event.payload.id;
+      if (!input.wait) {
+        return yield* readTask(scope, taskId, false, true);
+      }
+      return yield* waitUpgradingWake(scope, input.requestKey, taskId, input.timeoutMs);
+    });
+
   return OrchestratorMcpService.of({
     scheduleTask: (scope, input) =>
       Effect.gen(function* () {
@@ -1791,126 +2029,137 @@ const make = Effect.gen(function* () {
     delegateTask: (callerScope, input) =>
       Effect.gen(function* () {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
-        const parentRun = parent.runs
-          .filter(ThreadManagementService.isActiveRun)
-          .toSorted((left, right) => right.ordinal - left.ordinal)[0];
-        if (
-          parentRun === undefined ||
-          parentRun.rootNodeId === null ||
-          parentRun.providerInstanceId !== scope.thread.providerInstanceId
-        ) {
-          return yield* failure(
-            "parent_not_active",
-            "Delegated tasks require an active run owned by this MCP provider session.",
-          );
-        }
+        const parentRun = yield* activeParentRun(scope, parent);
         const providers = yield* loadProviders;
         const target = yield* resolveTargetRechecking({
           parent,
           target: input.target,
           providers,
         });
+        const sidekick = yield* fusionSidekickOf(parent);
+        if (sidekick !== undefined && target.modelSelection.instanceId === sidekick.instanceId) {
+          return yield* failure(
+            "invalid_request",
+            "Fusion is on for this thread: hand work to the sidekick with the `sidekick` tool, which keeps one persistent sidekick across handoffs.",
+          );
+        }
         const runtimeMode = yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);
         const interactionMode = yield* resolveInteractionMode(
           parent.thread.interactionMode,
           input.interactionMode,
         );
-        const key = yield* requestKey(input.clientRequestId);
-        const commandId = stableCommandId({
+        return yield* startDelegatedTask({
           scope,
-          requestKey: key,
-          operation: "delegate-task",
+          parentRun,
+          requestKey: yield* requestKey(input.clientRequestId),
+          task: taskPrompt(input),
+          title: input.title,
+          modelSelection: target.modelSelection,
+          runtimeMode,
+          interactionMode,
+          wait: input.mode === "wait",
+          timeoutMs: input.timeoutMs,
         });
-        const result = yield* threadManagement
-          .dispatch({
-            type: "delegated_task.request",
-            createdBy: "agent",
-            creationSource: "mcp",
-            commandId,
-            parentThreadId: scope.thread.threadId,
-            parentRunId: parentRun.id,
-            parentNodeId: parentRun.rootNodeId,
-            task: taskPrompt(input),
-            ...(input.title === undefined ? {} : { title: input.title }),
-            modelSelection: target.modelSelection,
-            runtimeMode,
-            interactionMode,
-            // Async delegations wake the parent on every child terminal; wait
-            // delegations deliver through the blocking tool call, so a wake is
-            // only needed if the parent settled first (timeout, disconnect).
-            completionWake: input.mode === "wait" ? "settled_only" : "always",
-          })
-          .pipe(
-            Effect.mapError((error) =>
-              failure(
+      }),
+    sidekick: (callerScope, input) =>
+      Effect.gen(function* () {
+        const { scope, parent } = yield* loadThreadCaller(callerScope, "sidekick");
+        const sidekick = yield* requireFusionSidekick(parent);
+        const handoffs = sidekickHandoffs(parent, sidekick);
+        const latest = handoffs.at(-1);
+        const block = input.block ?? true;
+        const key = yield* requestKey(input.clientRequestId);
+        if (latest !== undefined && latest.childThreadId !== null) {
+          const current = yield* readTask(scope, latest.id);
+          if (!isTerminalTaskStatus(current.status)) {
+            // One sidekick: a call during a running handoff is an update to it, steered into its live turn.
+            const delivered = yield* threadManagement
+              .sendToThread({
+                projectId: parent.thread.projectId,
+                commandId: stableCommandId({
+                  scope,
+                  requestKey: key,
+                  operation: "sidekick-update",
+                }),
+                threadId: latest.childThreadId,
+                senderThreadId: parent.thread.id,
+                messageId: stableOperationMessageId({
+                  scope,
+                  requestKey: key,
+                  operation: "sidekick-update",
+                }),
+                text: fusionHandoffUpdate(input.message),
+                attachments: [],
+                mode: "steer",
+                createdBy: "agent",
+                creationSource: "mcp",
+              })
+              .pipe(Effect.result);
+            if (delivered._tag === "Failure") {
+              const after = yield* readTask(scope, latest.id, false, true);
+              if (isTerminalTaskStatus(after.status)) {
+                return sidekickResult("finished_during_injection", handoffs.length, after);
+              }
+              return yield* failure(
                 "orchestration_error",
-                `Unable to create delegated task: ${errorMessage(error)}`,
-              ),
-            ),
-          );
-        const taskEvent = result.storedEvents.find(
-          (stored) =>
-            stored.event.type === "subagent.updated" && stored.event.payload.origin === "app_owned",
+                `Failed to deliver the update to the running sidekick: ${errorMessage(delivered.failure)}. Wait for its report with read_sidekick, then send the update as a new handoff.`,
+              );
+            }
+            if (!block) return sidekickResult("injected", handoffs.length, current);
+            const waited = yield* waitUpgradingWake(scope, key, latest.id, input.timeoutMs);
+            return sidekickResult(
+              waited.waitTimedOut ? "still_running" : "finished",
+              handoffs.length,
+              waited,
+            );
+          }
+        }
+        const parentRun = yield* activeParentRun(scope, parent);
+        const providers = yield* loadProviders;
+        const target = yield* resolveTargetRechecking({
+          parent,
+          target: { providerInstanceId: sidekick.instanceId, model: sidekick.model },
+          providers,
+        });
+        const handoff = handoffs.length + 1;
+        const result = yield* startDelegatedTask({
+          scope,
+          parentRun,
+          requestKey: key,
+          task:
+            latest === undefined
+              ? fusionFirstHandoff(input.message)
+              : fusionNextHandoff(input.message),
+          title: `Sidekick handoff ${handoff}`,
+          modelSelection: target.modelSelection,
+          runtimeMode: parent.thread.runtimeMode,
+          interactionMode: parent.thread.interactionMode,
+          wait: block,
+          timeoutMs: input.timeoutMs,
+          ...(latest?.childThreadId == null ? {} : { continueFromThreadId: latest.childThreadId }),
+        });
+        return sidekickResult(
+          !block ? "started" : result.waitTimedOut ? "still_running" : "finished",
+          handoff,
+          result,
         );
-        if (taskEvent?.event.type !== "subagent.updated") {
-          return yield* failure(
-            "orchestration_error",
-            "Delegated task command did not produce a task projection.",
-          );
+      }),
+    readSidekick: (callerScope, input) =>
+      Effect.gen(function* () {
+        const { scope, parent } = yield* loadThreadCaller(callerScope, "read_sidekick");
+        const sidekick = yield* requireFusionSidekick(parent);
+        const handoffs = sidekickHandoffs(parent, sidekick);
+        const latest = handoffs.at(-1);
+        if (latest === undefined) {
+          return yield* failure("task_not_found", "The sidekick has not had a handoff yet.");
         }
-        const taskId = taskEvent.event.payload.id;
-
-        if (input.mode !== "wait") {
-          return yield* readTask(scope, taskId, false, true);
-        }
-        const timeoutMs = Math.min(
-          MAX_WAIT_TIMEOUT_MS,
-          Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
+        const key = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+        const waited = yield* waitUpgradingWake(scope, key, latest.id, input.timeoutMs);
+        return sidekickResult(
+          waited.waitTimedOut ? "still_running" : "finished",
+          handoffs.length,
+          waited,
         );
-        const waited = yield* waitForTask(scope, taskId, timeoutMs);
-        if (Option.isSome(waited)) {
-          return waited.value;
-        }
-        // The blocking wait timed out, so it no longer owns delivery: upgrade
-        // the task so a later terminal wakes the parent even mid-turn. Best
-        // effort; on failure the settled_only policy still wakes a settled
-        // parent.
-        yield* threadManagement
-          .dispatch({
-            type: "delegated_task.wake-policy",
-            commandId: stableCommandId({
-              scope,
-              requestKey: key,
-              operation: "delegate-task-wake-policy",
-            }),
-            parentThreadId: scope.thread.threadId,
-            taskId,
-            completionWake: "always",
-          })
-          .pipe(
-            // The tool result is the timed-out task either way, so failures
-            // stay warnings. Keep the two shapes apart: a rejected receipt
-            // means this exact command id already failed (a replay of a
-            // no-op upgrade), while anything else is a fresh dispatch fault.
-            Effect.catch((error) =>
-              Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
-                taskId,
-                outcome:
-                  error._tag === "OrchestratorCommandPreviouslyRejectedError"
-                    ? "previously_rejected"
-                    : "dispatch_failed",
-                error,
-              }),
-            ),
-            Effect.catchCause((cause) =>
-              Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
-                taskId,
-                outcome: "defect",
-                cause,
-              }),
-            ),
-          );
-        return yield* readTask(scope, taskId, true, true);
       }),
     taskStatus: (callerScope, taskId) =>
       Effect.gen(function* () {
@@ -2472,4 +2721,5 @@ export const layer: Layer.Layer<
   | ScheduledTaskService.ScheduledTaskService
   | ProjectService.ProjectService
   | SecretRequests.SecretRequests
+  | ServerSettings.ServerSettingsService
 > = Layer.effect(OrchestratorMcpService, make);

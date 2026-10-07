@@ -114,6 +114,8 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   ),
   delegate_task: tool(["Delegate", "Delegating", "Delegated", "a child task"], "delegate"),
   task_status: tool(["Get", "Getting", "Got", "delegated task status"], "task-status"),
+  sidekick: tool(["Hand off", "Handing off", "Handed off", "work to the sidekick"], "delegate"),
+  read_sidekick: tool(["Read", "Waiting for", "Read", "the sidekick's report"], "task-status"),
   task_cancel: tool(
     ["Cancel", "Canceling", "Requested cancellation of", "delegated task"],
     "task-cancel",
