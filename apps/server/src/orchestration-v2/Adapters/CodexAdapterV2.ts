@@ -1304,12 +1304,18 @@ export function codexThreadRuntimeParams(input: {
                 http_headers: {
                   Authorization: mcpSession.authorizationHeader,
                 },
+                // Blocking T3 tools (delegate_task/sidekick waits, t3_thread_wait) may run up to 60
+                // minutes; Codex otherwise aborts the call after its own short default.
+                tool_timeout_sec: CODEX_T3_MCP_TOOL_TIMEOUT_SEC,
               },
             },
           }),
     },
   };
 }
+
+/** Above the 60-minute maximum wait of T3's blocking orchestration tools, like Claude's MCP timeout. */
+export const CODEX_T3_MCP_TOOL_TIMEOUT_SEC = 65 * 60;
 
 const decodeCodexResumeMetadata = Schema.decodeUnknownEffect(
   Schema.Struct({ thread: Schema.Struct({ id: Schema.String, updatedAt: Schema.Number }) }),
